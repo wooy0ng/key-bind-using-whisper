@@ -14,11 +14,11 @@ TODO:
     TODO 2: Dataset 제작 (O)
     TODO 3: trainer 제작 (O)
         TODO: last_hidden_state 차원 줄이기 (b, s, f) -> (b, f)
-            TODO: Mean Pooling 추가 (O)
+            TODO: Mean Pooling 추가 (V) [폐기]
         TODO: 손실함수 정의
-            TODO: 적대적 생성 신경망 (O)
-    TODO 4: inference 제작
-
+            TODO: 적대적 생성 신경망 (O) [폐기]
+    TODO 4: inference 제작 (O)
+    TODO 5: 랜덤성 부여 
 """
 
 def main(stage='train'):
@@ -33,10 +33,10 @@ def main(stage='train'):
     if stage == 'train':
         model.trainer(getattr(config, 'training'), dataset)
     elif stage == 'inference':    
-        model.inference(getattr(config, 'inference'), 'compare.wav')
+        model.inference(getattr(config, 'inference'), 'sample1.wav')
     
     return
 
 
 if __name__ == "__main__":
-    main(stage='inference')
+    main(stage='train')
