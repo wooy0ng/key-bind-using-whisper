@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "univ-project"
+version = "0.1.0"
+description = ""
+authors = ["wooy0ng"]
+license = "NOLicense"
+readme = "README.md"
+packages = [{include = "univ_project"}]
+
+[tool.poetry.dependencies]
+python = "^3.8"
+openai-whisper = {git = "https://github.com/openai/whisper.git"}
+omegaconf = "^2.3.0"
+torchaudio = "^0.13.1"
+audiomentations = "^0.28.0"
+numpy = "1.20"
+transformers = "^4.26.1"
+datasets="^2.9.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
