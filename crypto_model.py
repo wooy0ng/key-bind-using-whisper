@@ -82,8 +82,7 @@ class Discriminator(nn.Module):
             nn.Sigmoid()
         )
 
-    def forward(self, z, master_key):
-
+    def forward(self, z):
         layer1 = self.layer1(z)
         layer2 = self.layer2(layer1)
 
@@ -99,7 +98,7 @@ class CryptoModel(nn.Module):
         super(CryptoModel, self).__init__()
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-        self.whisper_model = WhisperModel.from_pretrained(
+        self.whisper_model = WhisperForConditionalGeneration.from_pretrained(
             pretrained_model_name_or_path='openai/whisper-tiny'
         ).to(self.device)
 
@@ -117,7 +116,8 @@ class CryptoModel(nn.Module):
     def _get_decoder_input_ids(self) -> torch.Tensor:
         compression_token = '[compression]'
         input_tokens = f'<|startoftranscript|><|ko|><|transcribe|><|notimestamps|> {compression_token}<|endoftext|>'
-        input_token_ids = self.whisper_tokenizer.encode(input_tokens)
+        input_token_ids = self.whisper_tokenizer(input_tokens)['input_ids']
+        input_token_ids = input_token_ids[2: -1]
 
         decoder_input_ids = torch.tensor(input_token_ids).to(device=self.device, dtype=torch.long)
         return decoder_input_ids
@@ -139,8 +139,8 @@ class CryptoModel(nn.Module):
             
     def forward(self, inputs):
         out = self.whisper_model(inputs, decoder_input_ids=self.decoder_input_ids.repeat(inputs.size(0), 1))
-        logits = out.last_hidden_state 
-        logits = logits[:, 4:-1, :]
+        logits = out.logits 
+        logits = logits[:, 4:-1, :] # TODO: logits 값에서 의미 있는 feature 추출하기 (batch, token_size)
         whisper_output = self.mean_pooling(logits)
 
         encoded = self.crypto_encoder(whisper_output)
@@ -152,28 +152,24 @@ class CryptoModel(nn.Module):
         dataloader = DataLoader(dataset, batch_size=config.batch_size, shuffle=True)
         master_key = utils.make_random_key(key_size=128)
 
-        optimizer_G = torch.optim.SGD(
+        optimizer_G = torch.optim.Adam(
             itertools.chain(self.crypto_encoder.parameters(), self.crypto_decoder.parameters()),
             lr=config.lr
         )
-        optimizer_D = torch.optim.SGD(
+        optimizer_D = torch.optim.Adam(
             self.discriminator.parameters(),
             lr=config.lr
         )
 
-        pixelwise_loss = torch.nn.MSELoss()
-        key_comp_loss = torch.nn.MSELoss()
+        pixelwise_loss = torch.nn.L1Loss()
+        classification_loss = torch.nn.BCELoss()
 
         Tensor = torch.cuda.FloatTensor if torch.cuda.is_available() else torch.FloatTensor
         for epoch in range(config.epoch):
             for idx, (path, inputs) in enumerate(dataloader):
                 # Adversarial ground truth
-                valid = master_key.unsqueeze(-1).type(Tensor)
-                valid = valid.repeat(inputs.size(0), 1, 1)
-                valid.requires_grad = False
-                
-                one_fake = Variable(Tensor(inputs.size(0), master_key.size(0), 1).fill_(1.0), requires_grad=False)   # (b, k, 1)
-                zero_fake = Variable(Tensor(inputs.size(0), master_key.size(0), 1).fill_(0.0), requires_grad=False)   # (b, k, 1)
+                valid = Variable(Tensor(inputs.size(0), 1).fill_(1.0), requires_grad=False)  
+                fake = Variable(Tensor(inputs.size(0), 1).fill_(0.0), requires_grad=False)   # (b, 1)
 
                 inputs = Variable(inputs.type(Tensor))
                 outputs = self(inputs)
@@ -189,10 +185,9 @@ class CryptoModel(nn.Module):
                 decoded = outputs['decoded']
                 
                 # calculate adversarial loss
-                # g_loss = 0.001 * adversarial_loss(self.discriminator(encoded).unsqueeze(-1), valid) \
-                #         + 0.999 * pixelwise_loss(decoded, embedding_vector)
-                g_loss = pixelwise_loss(embedding_vector, decoded)
-
+                g_loss = 0.001 * classification_loss(self.discriminator(encoded), valid) \
+                        + 0.999 * pixelwise_loss(decoded, embedding_vector)
+                
                 # backward
                 g_loss.backward()
                 optimizer_G.step()
@@ -204,13 +199,11 @@ class CryptoModel(nn.Module):
                 optimizer_D.zero_grad()
                 
                 # sample noize as discriminator ground truth 
-                z = Variable(Tensor(np.random.normal(0, 1, (inputs.size(0), valid.size(1)))))
+                z = Variable(Tensor(np.random.normal(0, 1, (inputs.size(0), master_key.size(0)))))
                 
-                real_loss = key_comp_loss(self.discriminator(z), valid)
-                # one_fake_loss = key_comp_loss(self.discriminator(encoded.detach()).unsqueeze(-1), one_fake)
-                # zero_fake_loss = key_comp_loss(self.discriminator(encoded.detach()).unsqueeze(-1), zero_fake)
-                # d_loss = 0.1 * (one_fake_loss + zero_fake_loss) + 0.9 * real_loss        # 학습에 큰 비중을 차지하는 loss
-                d_loss = real_loss
+                real_loss = classification_loss(self.discriminator(z), valid)
+                fake_loss = classification_loss(self.discriminator(encoded.detach()), fake)
+                d_loss = 0.5 * (real_loss + fake_loss)        # 학습에 큰 비중을 차지하는 loss
 
                 d_loss.backward()
                 optimizer_D.step()
