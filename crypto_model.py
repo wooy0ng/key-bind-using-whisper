@@ -130,7 +130,7 @@ class CryptoModel(nn.Module):
             print(f"{stage} g_loss : {kwargs['g_loss']}")
             print(f"{stage} d_loss : {kwargs['d_loss']}")
             
-    def forward(self, inputs, user_input):
+    def forward(self, inputs: torch.Tensor, user_input: str, check_user_input: bool=True):
         user_input_token_ids = torch.tensor(self.whisper_tokenizer.encode(user_input)[4:-1]).unsqueeze(-1).to(self.device)
 
         out = self.whisper_model(
@@ -150,7 +150,10 @@ class CryptoModel(nn.Module):
 
         correct_embed_vectors = []
         for idx, pred in enumerate(predicted_transcribe):
-            if pred == user_input:
+            if check_user_input is True:
+                if pred == user_input:
+                    correct_embed_vectors.append(decoder_last_hidden_state[idx, 3:, :].unsqueeze(0))
+            else:
                 correct_embed_vectors.append(decoder_last_hidden_state[idx, 3:, :].unsqueeze(0))
         if len(correct_embed_vectors) < 1:
             return None
@@ -165,7 +168,7 @@ class CryptoModel(nn.Module):
         
         return {'embedding_vector': correct_embed_vectors, 'encoded': encoded, 'decoded': decoded}
 
-    def trainer(self, config, dataset: Dataset, user_input: str):
+    def trainer(self, config, dataset: Dataset, user_input: str) -> None:
         Tensor = torch.cuda.FloatTensor if torch.cuda.is_available() else torch.FloatTensor
         
         dataloader = DataLoader(dataset, batch_size=config.batch_size, shuffle=True)
@@ -221,9 +224,6 @@ class CryptoModel(nn.Module):
         # save model
         torch.save(self.state_dict(), config.save_path)
 
-        print("path : ", path)
-        with open(f"encoded.pkl", "wb+") as f:
-            pkl.dump(encoded, f)
         return
     
     @torch.no_grad()
@@ -234,17 +234,14 @@ class CryptoModel(nn.Module):
         Tensor = torch.cuda.FloatTensor if torch.cuda.is_available() else torch.Tensor
         
         inputs = sound_data['mel'][0]
-        outputs = self(inputs.type(Tensor), user_input)
+        outputs = self(inputs.type(Tensor), user_input, check_user_input=False)
         encoded = outputs['encoded']
-
-        with open(f'encoded.pkl', 'rb+') as f:
-            instance = pkl.load(f)
 
         predicted = self.discriminator(encoded).squeeze()
 
         # round & compare 
         master_key = utils.make_random_key(key_size=128).cpu().detach()
-        predicted_key = torch.round(predicted).cpu().detach()
+        predicted_key = torch.round(predicted).to(dtype=torch.long).cpu().detach()
 
         print('master key : \t', utils.bit_to_string(master_key))
         print('predicted key : ', utils.bit_to_string(predicted_key))
