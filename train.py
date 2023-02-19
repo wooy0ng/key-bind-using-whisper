@@ -10,15 +10,16 @@ from torch.utils.data import DataLoader
 
 """
 TODO:
-    TODO 1: sound 데이터 증강(O)
-    TODO 2: Dataset 제작 (O)
-    TODO 3: trainer 제작 (O)
+    TODO : sound 데이터 증강(O)
+    TODO : Dataset 제작 (O)
+    TODO : inference 제작 (O)
+    TODO : trainer 제작 (O)
         TODO: last_hidden_state 차원 줄이기 (b, s, f) -> (b, f)
-            TODO: Mean Pooling 추가 (V) [폐기]
+            TODO: Mean Pooling 추가 (X) [폐기]
         TODO: 손실함수 정의
-            TODO: 적대적 생성 신경망 (O) [폐기]
-    TODO 4: inference 제작 (O)
-    TODO 5: 랜덤성 부여 
+            TODO: 적대적 생성 신경망 (O)
+                TODO: key generate 모델 학습을 더 어렵게 만들기  
+    TODO : 랜덤성 부여
 """
 
 def main(user_input, stage='train'):
@@ -35,7 +36,7 @@ def main(user_input, stage='train'):
     elif stage == 'inference':    
         model.inference(
             getattr(config, 'inference'), 
-            'sample1.wav', 
+            'compare2.wav', 
             user_input
         )
     
@@ -43,4 +44,4 @@ def main(user_input, stage='train'):
 
 
 if __name__ == "__main__":
-    main(stage='train', user_input='안녕하세요')
+    main(stage='inference', user_input='안녕하세요')
