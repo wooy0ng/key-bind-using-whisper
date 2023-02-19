@@ -1,0 +1,8 @@
+training:
+    batch_size: 8
+    epoch: 50
+    lr: 1e-3
+    save_path: 'model/pre_trained_model.pt'
+
+inference:
+    load_path: 'model/pre_trained_model.pt'

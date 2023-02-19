@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import utils
+import pickle as pkl
 
 from torch.utils.data import Dataset, DataLoader
 from torch.autograd import Variable
@@ -19,10 +20,10 @@ class CryptoEncoder(nn.Module):
     
         self.model = nn.Sequential(
             nn.Linear(self.in_features, 256),
-            nn.Dropout(p=0.2),
+            nn.Dropout(),
             nn.ReLU(),
             nn.Linear(256, 256),
-            nn.Dropout(p=0.2),
+            nn.Dropout(),
             nn.ReLU()
         )
         
@@ -31,7 +32,7 @@ class CryptoEncoder(nn.Module):
     
     def reparameterization(self, mu, logvar):
         std = torch.exp(logvar / 2)
-        sampled_z = Variable(torch.Tensor(np.random.normal(0, 1, (mu.size(0), self.latent_dim)))).to(
+        sampled_z = Variable(torch.Tensor(np.random.normal(0, 1, mu.size()))).to(
             'cuda' if torch.cuda.is_available() else 'cpu'
         )
         z = sampled_z * std + mu
@@ -54,13 +55,12 @@ class CryptoDecoder(nn.Module):
 
         self.model = nn.Sequential(
             nn.Linear(self.latent_dim, 256),
-            nn.Dropout(p=0.2),
+            nn.Dropout(),
             nn.ReLU(),
             nn.Linear(256, 256),
-            nn.Dropout(p=0.2),
+            nn.Dropout(),
             nn.ReLU(),
             nn.Linear(256, self.out_features),
-            nn.Tanh()
         )
     
     def forward(self, z):
@@ -71,26 +71,23 @@ class Discriminator(nn.Module):
     def __init__(self):
         super(Discriminator, self).__init__()
         self.latent_dim = 128       # key size
-        self.layer1 = nn.Sequential(
+        self.fc1 = nn.Sequential(
             nn.Linear(self.latent_dim, self.latent_dim),
-            nn.Dropout(p=0.2),
-            nn.ReLU(),
+            nn.Dropout(),
+            nn.PReLU(),
         )
-        self.layer2 = nn.Sequential(
-            nn.Linear(self.latent_dim, 1),
-            nn.Dropout(p=0.2),
+        self.fc2 = nn.Sequential(
+            nn.Linear(self.latent_dim, self.latent_dim),
             nn.Sigmoid()
         )
 
     def forward(self, z):
-        layer1 = self.layer1(z)
-        layer2 = self.layer2(layer1)
+        residual = z
+        hidden_states = self.fc1(z)
+        hidden_states = residual + hidden_states
+        hidden_states = self.fc2(hidden_states)
 
-        return layer2
-
-    def mean_pooling(self, last_hidden_state):
-        summarize = torch.sum(last_hidden_state, 1)
-        return summarize / last_hidden_state.size(1)
+        return hidden_states
 
 
 class CryptoModel(nn.Module):
@@ -105,31 +102,27 @@ class CryptoModel(nn.Module):
         self.whisper_tokenizer = WhisperTokenizer.from_pretrained(
             pretrained_model_name_or_path='openai/whisper-tiny'
         )
-        self.decoder_input_ids = self._get_decoder_input_ids()
-        
         self.whisper_model = self._freeze(self.whisper_model)
+        
+        self.decoder_input_ids = self._get_decoder_input_ids()
+        self.whisper_model.forced_decoder_ids = self.decoder_input_ids['forced_decoder_ids']
         
         self.crypto_encoder = CryptoEncoder()
         self.crypto_decoder = CryptoDecoder()
         self.discriminator = Discriminator()
 
     def _get_decoder_input_ids(self) -> torch.Tensor:
-        compression_token = '[compression]'
-        input_tokens = f'<|startoftranscript|><|ko|><|transcribe|><|notimestamps|> {compression_token}<|endoftext|>'
-        input_token_ids = self.whisper_tokenizer(input_tokens)['input_ids']
-        input_token_ids = input_token_ids[2: -1]
-
-        decoder_input_ids = torch.tensor(input_token_ids).to(device=self.device, dtype=torch.long)
-        return decoder_input_ids
+        forced_decoder_ids = self.whisper_tokenizer.get_decoder_prompt_ids(language='ko', task='transcribe')
+        decoded_input_ids = [50258] + [ids for _, ids in forced_decoder_ids]
+        return {
+            'forced_decoder_ids': forced_decoder_ids,
+            'decoder_input_ids': torch.tensor(decoded_input_ids).to(self.device)
+        }
     
     def _freeze(self, model):
         for param in model.parameters():
             param.requires_grad = False
         return model
-    
-    def mean_pooling(self, logits):
-        summarize = torch.sum(logits, 1)
-        return summarize / logits.size(1)
     
     def print_log(self, stage='train', **kwargs):
         if stage == 'train':
@@ -137,94 +130,115 @@ class CryptoModel(nn.Module):
             print(f"{stage} g_loss : {kwargs['g_loss']}")
             print(f"{stage} d_loss : {kwargs['d_loss']}")
             
-    def forward(self, inputs):
-        out = self.whisper_model(inputs, decoder_input_ids=self.decoder_input_ids.repeat(inputs.size(0), 1))
-        logits = out.logits 
-        logits = logits[:, 4:-1, :] # TODO: logits 값에서 의미 있는 feature 추출하기 (batch, token_size)
-        whisper_output = self.mean_pooling(logits)
+    def forward(self, inputs, user_input):
+        user_input_token_ids = torch.tensor(self.whisper_tokenizer.encode(user_input)[4:-1]).unsqueeze(-1).to(self.device)
 
-        encoded = self.crypto_encoder(whisper_output)
+        out = self.whisper_model(
+            inputs, 
+            decoder_input_ids=self.decoder_input_ids['decoder_input_ids'].repeat(inputs.size(0), 1),
+            output_hidden_states=True
+        )
+        decoder_last_hidden_state = out.decoder_hidden_states[-1]
+        logits = out.logits 
+
+        logprobs = F.log_softmax(logits, dim=-1)
+        logprobs = logprobs[:, 3:, :]
+        predicted_token_ids = torch.argmax(logprobs, dim=-1)
+        predicted_transcribe = [pred.strip() for pred in self.whisper_tokenizer.batch_decode(predicted_token_ids)]
+        
+        # predict_logits = torch.gather(logits, dim=-1, index=predicted_token_ids.repeat(4, 1, 1))
+
+        correct_embed_vectors = []
+        for idx, pred in enumerate(predicted_transcribe):
+            if pred == user_input:
+                correct_embed_vectors.append(decoder_last_hidden_state[idx, 3:, :].unsqueeze(0))
+        if len(correct_embed_vectors) < 1:
+            return None
+        correct_embed_vectors = torch.cat(correct_embed_vectors)    # (b, T, F)
+        correct_embed_vectors = F.layer_norm(
+            correct_embed_vectors, 
+            normalized_shape=(correct_embed_vectors.size(-1), )
+        )
+
+        encoded = self.crypto_encoder(correct_embed_vectors)
         decoded = self.crypto_decoder(encoded)
         
-        return {'embedding_vector': whisper_output, 'encoded': encoded, 'decoded': decoded}
+        return {'embedding_vector': correct_embed_vectors, 'encoded': encoded, 'decoded': decoded}
 
-    def trainer(self, config, dataset: Dataset):
+    def trainer(self, config, dataset: Dataset, user_input: str):
+        Tensor = torch.cuda.FloatTensor if torch.cuda.is_available() else torch.FloatTensor
+        
         dataloader = DataLoader(dataset, batch_size=config.batch_size, shuffle=True)
-        master_key = utils.make_random_key(key_size=128)
+        master_key = utils.make_random_key(key_size=128, return_negative=False).type(Tensor)   # (key_size, )
 
-        optimizer_G = torch.optim.Adam(
+        optimizer_A = torch.optim.Adam(
             itertools.chain(self.crypto_encoder.parameters(), self.crypto_decoder.parameters()),
             lr=config.lr
         )
-        optimizer_D = torch.optim.Adam(
+        optimizer_G = torch.optim.Adam(
             self.discriminator.parameters(),
             lr=config.lr
         )
 
-        pixelwise_loss = torch.nn.L1Loss()
-        classification_loss = torch.nn.BCELoss()
+        pixelwise_loss = torch.nn.MSELoss()
+        bitwise_loss = torch.nn.MSELoss()
 
-        Tensor = torch.cuda.FloatTensor if torch.cuda.is_available() else torch.FloatTensor
         for epoch in range(config.epoch):
             for idx, (path, inputs) in enumerate(dataloader):
-                # Adversarial ground truth
-                valid = Variable(Tensor(inputs.size(0), 1).fill_(1.0), requires_grad=False)  
-                fake = Variable(Tensor(inputs.size(0), 1).fill_(0.0), requires_grad=False)   # (b, 1)
-
                 inputs = Variable(inputs.type(Tensor))
-                outputs = self(inputs)
-                
-                # ---------------
-                # train generator
-                # ---------------
-
-                optimizer_G.zero_grad()
+                outputs = self(inputs, user_input)
+                if outputs is None:
+                    continue
                 
                 embedding_vector = outputs['embedding_vector']
                 encoded = outputs['encoded']
                 decoded = outputs['decoded']
                 
-                # calculate adversarial loss
-                g_loss = 0.001 * classification_loss(self.discriminator(encoded), valid) \
-                        + 0.999 * pixelwise_loss(decoded, embedding_vector)
-                
-                # backward
+                # --------------------
+                # training autoencoder
+                # --------------------
+                optimizer_A.zero_grad()
+
+                a_loss = pixelwise_loss(embedding_vector, decoded)    # autoencoder
+                a_loss.backward()
+                optimizer_A.step()
+
+                # ---------------------
+                # training key generator
+                # ---------------------
+                optimizer_G.zero_grad()
+
+                g_loss = 0.01 * pixelwise_loss(embedding_vector, decoded.detach()) \
+                        + 0.99 * bitwise_loss(self.discriminator(encoded.detach()), master_key.repeat(encoded.size(0), 1, 1))
                 g_loss.backward()
                 optimizer_G.step()
 
-                # -------------------
-                # train discriminator
-                # -------------------
+                print(f"epoch : {epoch+1}, a_loss : {a_loss.item()}, g_loss : {g_loss.item()}")
 
-                optimizer_D.zero_grad()
-                
-                # sample noize as discriminator ground truth 
-                z = Variable(Tensor(np.random.normal(0, 1, (inputs.size(0), master_key.size(0)))))
-                
-                real_loss = classification_loss(self.discriminator(z), valid)
-                fake_loss = classification_loss(self.discriminator(encoded.detach()), fake)
-                d_loss = 0.5 * (real_loss + fake_loss)        # 학습에 큰 비중을 차지하는 loss
-
-                d_loss.backward()
-                optimizer_D.step()
-                
-                train_logs = {'epoch': epoch, 'iteration': idx, 'g_loss': g_loss, 'd_loss': d_loss}
-                self.print_log(stage='train', **train_logs)
+                # train_logs = {'epoch': epoch, 'iteration': idx, 'g_loss': g_loss, 'd_loss': d_loss}
+                # self.print_log(stage='train', **train_logs)
                 
         # save model
         torch.save(self.state_dict(), config.save_path)
+
+        print("path : ", path)
+        with open(f"encoded.pkl", "wb+") as f:
+            pkl.dump(encoded, f)
         return
     
     @torch.no_grad()
-    def inference(self, config, wav_path):
+    def inference(self, config, wav_path, user_input):
         sound_data = load_sound_data(wav_path, return_mel=True)
         self.load_state_dict(torch.load(config.load_path))
 
         Tensor = torch.cuda.FloatTensor if torch.cuda.is_available() else torch.Tensor
         
         inputs = sound_data['mel'][0]
-        outputs = self(inputs.type(Tensor))
+        outputs = self(inputs.type(Tensor), user_input)
         encoded = outputs['encoded']
+
+        with open(f'encoded.pkl', 'rb+') as f:
+            instance = pkl.load(f)
 
         predicted = self.discriminator(encoded).squeeze()
 
