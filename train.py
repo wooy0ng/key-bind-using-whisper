@@ -36,7 +36,7 @@ def main(user_input, stage='train'):
     elif stage == 'inference':    
         model.inference(
             getattr(config, 'inference'), 
-            'compare2.wav', 
+            'sample1.wav', 
             user_input
         )
     

@@ -72,21 +72,17 @@ class Discriminator(nn.Module):
         super(Discriminator, self).__init__()
         self.latent_dim = 128       # key size
         self.fc1 = nn.Sequential(
-            nn.Linear(self.latent_dim, self.latent_dim),
+            nn.Linear(self.latent_dim, self.latent_dim*4),
             nn.Dropout(),
             nn.PReLU(),
         )
-        self.fc2 = nn.Sequential(
-            nn.Linear(self.latent_dim, self.latent_dim),
-            nn.Sigmoid()
-        )
+        self.fc2 = nn.Linear(self.latent_dim*4, 1)
 
     def forward(self, z):
         residual = z
         hidden_states = self.fc1(z)
-        hidden_states = residual + hidden_states
+        # hidden_states = residual + hidden_states
         hidden_states = self.fc2(hidden_states)
-
         return hidden_states
 
 
@@ -174,17 +170,17 @@ class CryptoModel(nn.Module):
         dataloader = DataLoader(dataset, batch_size=config.batch_size, shuffle=True)
         master_key = utils.make_random_key(key_size=128, return_negative=False).type(Tensor)   # (key_size, )
 
-        optimizer_A = torch.optim.Adam(
+        optimizer_G = torch.optim.Adam(
             itertools.chain(self.crypto_encoder.parameters(), self.crypto_decoder.parameters()),
             lr=config.lr
         )
-        optimizer_G = torch.optim.Adam(
+        optimizer_D = torch.optim.Adam(
             self.discriminator.parameters(),
             lr=config.lr
         )
 
         pixelwise_loss = torch.nn.MSELoss()
-        bitwise_loss = torch.nn.MSELoss()
+        classification_loss = torch.nn.BCEWithLogitsLoss()
 
         for epoch in range(config.epoch):
             for idx, (path, inputs) in enumerate(dataloader):
@@ -196,27 +192,39 @@ class CryptoModel(nn.Module):
                 embedding_vector = outputs['embedding_vector']
                 encoded = outputs['encoded']
                 decoded = outputs['decoded']
+
+                # master_key = master_key.repeat(encoded.size(0), 1, 1)
+                valid = Variable(Tensor(*encoded.size()[:2], 1).fill_(1.0), requires_grad=False)
+                fake = Variable(Tensor(*encoded.size()[:2], 1).fill_(0.0), requires_grad=False)
                 
                 # --------------------
                 # training autoencoder
                 # --------------------
-                optimizer_A.zero_grad()
-
-                a_loss = pixelwise_loss(embedding_vector, decoded)    # autoencoder
-                a_loss.backward()
-                optimizer_A.step()
-
-                # ---------------------
-                # training key generator
-                # ---------------------
                 optimizer_G.zero_grad()
 
-                g_loss = 0.01 * pixelwise_loss(embedding_vector, decoded.detach()) \
-                        + 0.99 * bitwise_loss(self.discriminator(encoded.detach()), master_key.repeat(encoded.size(0), 1, 1))
+                g_loss = 0.001 * classification_loss(self.discriminator(encoded), valid) \
+                        + 0.999 * pixelwise_loss(embedding_vector, decoded)
                 g_loss.backward()
                 optimizer_G.step()
 
-                print(f"epoch : {epoch+1}, a_loss : {a_loss.item()}, g_loss : {g_loss.item()}")
+                # ---------------------
+                # training key generator (Discriminator)
+                # ---------------------
+
+                # TODO: 적대적 손실 계산 - GAN
+                z = Variable(Tensor(np.random.normal(0, 1, encoded.size())))    # random noize
+                # fake_key = torch.randint(0, 2, master_key.size())
+
+                optimizer_D.zero_grad()
+
+                real_loss = classification_loss(self.discriminator(z), valid)
+                fake_loss = classification_loss(self.discriminator(encoded.detach()), fake)
+
+                d_loss = 0.5 * (real_loss + fake_loss)
+                d_loss.backward()
+                optimizer_D.step()
+
+                print(f"epoch : {epoch+1}, g_loss : {g_loss.item()}, d_loss : {d_loss.item()}")
 
                 # train_logs = {'epoch': epoch, 'iteration': idx, 'g_loss': g_loss, 'd_loss': d_loss}
                 # self.print_log(stage='train', **train_logs)
@@ -237,13 +245,9 @@ class CryptoModel(nn.Module):
         outputs = self(inputs.type(Tensor), user_input, check_user_input=False)
         encoded = outputs['encoded']
 
-        predicted = self.discriminator(encoded).squeeze()
+        predicted = torch.sigmoid(self.discriminator(encoded).squeeze())
 
-        # round & compare 
-        master_key = utils.make_random_key(key_size=128).cpu().detach()
-        predicted_key = torch.round(predicted).to(dtype=torch.long).cpu().detach()
-
-        print('master key : \t', utils.bit_to_string(master_key))
-        print('predicted key : ', utils.bit_to_string(predicted_key))
+        # classification
+        print(f"classification : {predicted.item()}")
             
         return
