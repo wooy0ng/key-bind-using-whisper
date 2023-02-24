@@ -73,23 +73,21 @@ class Discriminator(nn.Module):
         self.latent_dim = 128       # key size
 
         self.fc1 = nn.Linear(384, self.latent_dim)
-        self.w = torch.nn.Parameter(data=torch.Tensor(self.latent_dim, self.latent_dim), requires_grad=True)
-        self._init_w_param()
-
-    def _init_w_param(self):
-        nn.init.xavier_normal_(self.w)
+        self.w = torch.nn.Parameter(data=torch.Tensor(np.random.normal(0, 1, (self.latent_dim,))), requires_grad=True)
 
     def limit_param_range(self):
         self.w.data.clamp_(-10., 10.)
 
-    def forward(self, z, negative_key):
+    def forward(self, z):
         hidden_states = z
         hidden_states = self.fc1(hidden_states)  # (b, 128)
         
-        hidden_states = hidden_states * negative_key
-        hidden_states = hidden_states @ self.w.T
+        # # binding step
+        # hidden_states = hidden_states * torch.where(key==0, -1., 1.)
+        hidden_states = hidden_states * self.w
+        # hidden_states = F.dropout(hidden_states, p=0.2)
         
-        hidden_states = torch.tanh(hidden_states)   # -1 ~ 1
+        hidden_states = torch.sigmoid(hidden_states)   # -1 ~ 1
         return hidden_states
 
 
@@ -126,6 +124,12 @@ class CryptoModel(nn.Module):
         for param in model.parameters():
             param.requires_grad = False
         return model
+
+    def gaussian_normalization(self, x: torch.Tensor) -> torch.Tensor:
+        mean, std = x.mean(dim=-1).unsqueeze(-1), x.std(dim=-1).unsqueeze(-1)
+
+        x = (x - mean) / std
+        return x
     
     def print_log(self, stage='train', **kwargs):
         if stage == 'train':
@@ -163,10 +167,14 @@ class CryptoModel(nn.Module):
             correct_embed_vectors = torch.mean(correct_embed_vectors, dim=1) # (b, F)
         else: 
             correct_embed_vectors = correct_embed_vectors.squeeze(1)
-        correct_embed_vectors = F.layer_norm(
-            correct_embed_vectors, 
-            normalized_shape=(correct_embed_vectors.size(-1), )
-        )
+
+        correct_embed_vectors = self.gaussian_normalization(correct_embed_vectors)
+        
+        # layer normalization
+        # correct_embed_vectors = F.layer_norm(
+        #     correct_embed_vectors, 
+        #     normalized_shape=(correct_embed_vectors.size(-1), )
+        # )
 
         return {'embed_vectors': correct_embed_vectors}
 
@@ -176,17 +184,14 @@ class CryptoModel(nn.Module):
         dataloader = DataLoader(dataset, batch_size=config.batch_size, shuffle=True)
         master_key = utils.make_random_key(key_size=128, return_negative=False).type(Tensor)   # (key_size, )
 
-        optimizer_G = torch.optim.Adam(
-            itertools.chain(self.crypto_encoder.parameters(), self.crypto_decoder.parameters()),
-            lr=config.lr
-        )
         optimizer_D = torch.optim.Adam(
             self.discriminator.parameters(),
             lr=config.lr
         )
 
-        pixelwise_loss = torch.nn.MSELoss()
-        classification_loss = torch.nn.MSELoss()
+        pixelwise_loss = nn.MSELoss()
+        cosine_similarity = nn.CosineSimilarity()
+        
 
         for epoch in range(config.epoch):
             for idx, (path, inputs) in enumerate(dataloader):
@@ -195,21 +200,26 @@ class CryptoModel(nn.Module):
                 if outputs is None:
                     continue
                 
-                embed_vectors = outputs['embed_vectors']
-                valid_key = master_key.repeat(embed_vectors.size(0), 1)
+                valid_embed_vectors = outputs['embed_vectors']
+                valid_key = master_key.repeat(valid_embed_vectors.size(0), 1)
+                
+                fake_embed_vectors = Tensor(np.random.normal(0, 1, valid_embed_vectors.shape))
+
+                batch_embed_vectors = torch.cat([valid_embed_vectors, fake_embed_vectors])
+                batch_key = torch.cat([valid_key, valid_key])
 
                 # ---------------
                 # training weight
                 # ---------------
-                out = self.discriminator(embed_vectors, torch.where(valid_key==0, 1., -1.))
+                out = self.discriminator(batch_embed_vectors)
 
-                optimizer_G.zero_grad()
+                optimizer_D.zero_grad()
 
-                g_loss = pixelwise_loss(out, torch.where(valid_key==0, -1., 1.))
+                cos = cosine_similarity(out, batch_key).unsqueeze(-1)
+
+                g_loss = pixelwise_loss(cos, Tensor(cos.size()).fill_(1.))
                 g_loss.backward()
-                optimizer_G.step()
-
-                self.discriminator.limit_param_range()
+                optimizer_D.step()
 
                 print(f"g loss : {g_loss.item()}")
 
@@ -227,11 +237,16 @@ class CryptoModel(nn.Module):
         
         inputs = sound_data['mel'][0]
         outputs = self(inputs.type(Tensor), user_input, check_user_input=False)
-        encoded = outputs['encoded']
+        encoded = outputs['embed_vectors']
 
-        predicted = torch.sigmoid(self.discriminator(encoded).squeeze())
+        predicted = self.discriminator(encoded)
+        predicted = torch.where(predicted < 0.5, 0, 1)
+        predicted = predicted.squeeze().cpu().detach()
+        
+        answer = utils.make_random_key(key_size=128)
 
         # classification
-        print(f"classification : {predicted.item()}")
+        print(f"p : {utils.bit_to_string(predicted)}")
+        print(f"a : {utils.bit_to_string(answer)}")
             
         return

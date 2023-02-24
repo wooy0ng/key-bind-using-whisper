@@ -44,4 +44,4 @@ def main(user_input, stage='train'):
 
 
 if __name__ == "__main__":
-    main(stage='train', user_input='안녕하세요')
+    main(stage='inference', user_input='안녕하세요')
