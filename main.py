@@ -33,15 +33,11 @@ def main(user_input, stage='train'):
     model = CryptoModel().to(device)
     if stage == 'train':
         model.trainer(getattr(config, 'training'), dataset, user_input)
-    elif stage == 'inference':    
-        model.inference(
-            getattr(config, 'inference'), 
-            'sample1.wav', 
-            user_input
-        )
-    
+    elif stage == 'test':    
+        model.test(getattr(config, 'inference'), 'sample1.wav', user_input)
+    elif stage == 'inference':
+        model.inference(getattr(config, 'inference'), 'sample1.wav', user_input)    
     return
-
 
 if __name__ == "__main__":
     main(stage='inference', user_input='안녕하세요')

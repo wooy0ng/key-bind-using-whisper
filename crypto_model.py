@@ -1,6 +1,5 @@
 from dataloader import load_sound_data
 
-import itertools
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,68 +7,15 @@ import numpy as np
 import utils
 import pickle as pkl
 
+from omegaconf import OmegaConf
 from torch.utils.data import Dataset, DataLoader
 from torch.autograd import Variable
 from transformers import WhisperModel, WhisperTokenizer, WhisperForConditionalGeneration
 
-class CryptoEncoder(nn.Module):
+
+class CryptoModelOutputLayer(nn.Module):
     def __init__(self):
-        super(CryptoEncoder, self).__init__()
-        self.in_features = 384      
-        self.latent_dim = 128
-    
-        self.model = nn.Sequential(
-            nn.Linear(self.in_features, 256),
-            nn.Dropout(),
-            nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.Dropout(),
-            nn.ReLU()
-        )
-        
-        self.mu = nn.Linear(256, self.latent_dim)
-        self.logvar = nn.Linear(256, self.latent_dim)
-    
-    def reparameterization(self, mu, logvar):
-        std = torch.exp(logvar / 2)
-        sampled_z = Variable(torch.Tensor(np.random.normal(0, 1, mu.size()))).to(
-            'cuda' if torch.cuda.is_available() else 'cpu'
-        )
-        z = sampled_z * std + mu
-        return z
-
-    def forward(self, inputs):
-        out = self.model(inputs)
-        mu = self.mu(out)
-        logvar = self.logvar(out)
-
-        z = self.reparameterization(mu, logvar)
-        return z
-        
-
-class CryptoDecoder(nn.Module):
-    def __init__(self):
-        super(CryptoDecoder, self).__init__()
-        self.out_features = 384
-        self.latent_dim = 128       # key size가 되지 않을까?
-
-        self.model = nn.Sequential(
-            nn.Linear(self.latent_dim, 256),
-            nn.Dropout(),
-            nn.ReLU(),
-            nn.Linear(256, 256),
-            nn.Dropout(),
-            nn.ReLU(),
-            nn.Linear(256, self.out_features),
-        )
-    
-    def forward(self, z):
-        q = self.model(z)   # (batch, sequence, features)
-        return q
-
-class Discriminator(nn.Module):
-    def __init__(self):
-        super(Discriminator, self).__init__()
+        super(CryptoModelOutputLayer, self).__init__()
         self.latent_dim = 128       # key size
 
         self.fc1 = nn.Linear(384, self.latent_dim)
@@ -108,9 +54,7 @@ class CryptoModel(nn.Module):
         self.decoder_input_ids = self._get_decoder_input_ids()
         self.whisper_model.forced_decoder_ids = self.decoder_input_ids['forced_decoder_ids']
         
-        self.crypto_encoder = CryptoEncoder()
-        self.crypto_decoder = CryptoDecoder()
-        self.discriminator = Discriminator()
+        self.output_layer = CryptoModelOutputLayer()
 
     def _get_decoder_input_ids(self) -> torch.Tensor:
         forced_decoder_ids = self.whisper_tokenizer.get_decoder_prompt_ids(language='ko', task='transcribe')
@@ -184,15 +128,14 @@ class CryptoModel(nn.Module):
         dataloader = DataLoader(dataset, batch_size=config.batch_size, shuffle=True)
         master_key = utils.make_random_key(key_size=128, return_negative=False).type(Tensor)   # (key_size, )
 
-        optimizer_D = torch.optim.Adam(
+        optimizer = torch.optim.Adam(
             self.discriminator.parameters(),
             lr=config.lr
         )
 
-        pixelwise_loss = nn.MSELoss()
+        criterion = nn.MSELoss()
         cosine_similarity = nn.CosineSimilarity()
         
-
         for epoch in range(config.epoch):
             for idx, (path, inputs) in enumerate(dataloader):
                 inputs = Variable(inputs.type(Tensor))
@@ -211,25 +154,24 @@ class CryptoModel(nn.Module):
                 # ---------------
                 # training weight
                 # ---------------
-                out = self.discriminator(batch_embed_vectors)
+                out = self.output_layer(batch_embed_vectors)
 
-                optimizer_D.zero_grad()
+                optimizer.zero_grad()
 
                 cos = cosine_similarity(out, batch_key).unsqueeze(-1)
 
-                g_loss = pixelwise_loss(cos, Tensor(cos.size()).fill_(1.))
-                g_loss.backward()
-                optimizer_D.step()
+                loss = criterion(cos, Tensor(cos.size()).fill_(1.))
+                loss.backward()
+                optimizer.step()
 
-                print(f"g loss : {g_loss.item()}")
+                print(f"cosine similarity loss : {loss.item()}")
 
         # save model
         torch.save(self.state_dict(), config.save_path)
-
         return
     
     @torch.no_grad()
-    def inference(self, config, wav_path, user_input):
+    def test(self, config:OmegaConf , wav_path: str, user_input: str) -> None:
         sound_data = load_sound_data(wav_path, return_mel=True)
         self.load_state_dict(torch.load(config.load_path))
 
@@ -239,14 +181,36 @@ class CryptoModel(nn.Module):
         outputs = self(inputs.type(Tensor), user_input, check_user_input=False)
         encoded = outputs['embed_vectors']
 
-        predicted = self.discriminator(encoded)
+        predicted = self.output_layer(encoded)
         predicted = torch.where(predicted < 0.5, 0, 1)
         predicted = predicted.squeeze().cpu().detach()
         
         answer = utils.make_random_key(key_size=128)
 
-        # classification
         print(f"p : {utils.bit_to_string(predicted)}")
         print(f"a : {utils.bit_to_string(answer)}")
             
         return
+    
+    def inference(self, config: OmegaConf, wav_path: str, user_input: str) -> None:
+        sound_data = load_sound_data(wav_path, return_mel=True)
+        self.load_state_dict(torch.load(config.load_path))
+
+        Tensor = torch.cuda.FloatTensor if torch.cuda.is_available() else torch.Tensor
+        
+        inputs = sound_data['mel'][0]
+        outputs = self(inputs.type(Tensor), user_input, check_user_input=True)
+
+        if outputs:
+            encoded = outputs['embed_vectors']
+
+            predicted = self.output_layer(encoded)
+            predicted = torch.where(predicted < 0.5, 0, 1)
+            predicted = predicted.squeeze().cpu().detach()
+
+            print(f"predicted : {utils.bit_to_string(predicted)}")
+        else:
+            print("you are not user")
+
+        return
+        
