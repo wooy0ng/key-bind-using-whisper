@@ -33,7 +33,7 @@ class CryptoModelOutputLayer(nn.Module):
         hidden_states = hidden_states * self.w
         # hidden_states = F.dropout(hidden_states, p=0.2)
         
-        hidden_states = torch.sigmoid(hidden_states)   # -1 ~ 1
+        hidden_states = torch.sigmoid(hidden_states)   # 0 ~ 1
         return hidden_states
 
 
