@@ -18,7 +18,7 @@ TODO:
             TODO: Mean Pooling 추가 (X) [폐기]
         TODO: 손실함수 정의
             TODO: 적대적 생성 신경망 (O)
-                TODO: key generate 모델 학습을 더 어렵게 만들기  
+                TODO: key generate 모델 학습을 더 어렵게 만들기
     TODO : 랜덤성 부여
 """
 
@@ -34,10 +34,10 @@ def main(user_input, stage='train'):
     if stage == 'train':
         model.trainer(getattr(config, 'training'), dataset, user_input)
     elif stage == 'test':    
-        model.test(getattr(config, 'inference'), 'sample1.wav', user_input)
+        model.test(getattr(config, 'inference'), 'compare2.wav', user_input)
     elif stage == 'inference':
         model.inference(getattr(config, 'inference'), 'sample1.wav', user_input)    
     return
 
 if __name__ == "__main__":
-    main(stage='inference', user_input='안녕하세요')
+    main(stage='test', user_input='안녕하세요')

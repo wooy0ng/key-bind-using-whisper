@@ -6,6 +6,7 @@ import torch.nn.functional as F
 import numpy as np
 import utils
 import pickle as pkl
+import os
 
 from omegaconf import OmegaConf
 from torch.utils.data import Dataset, DataLoader
@@ -27,6 +28,7 @@ class CryptoModelOutputLayer(nn.Module):
     def forward(self, z):
         hidden_states = z
         hidden_states = self.fc1(hidden_states)  # (b, 128)
+        hidden_states = F.dropout(hidden_states, p=0.1)
         
         # # binding step
         # hidden_states = hidden_states * torch.where(key==0, -1., 1.)
@@ -71,7 +73,6 @@ class CryptoModel(nn.Module):
 
     def gaussian_normalization(self, x: torch.Tensor) -> torch.Tensor:
         mean, std = x.mean(dim=-1).unsqueeze(-1), x.std(dim=-1).unsqueeze(-1)
-
         x = (x - mean) / std
         return x
     
@@ -88,8 +89,8 @@ class CryptoModel(nn.Module):
             output_hidden_states=True
         )
         decoder_last_hidden_state = out.decoder_hidden_states[-1]
+        
         logits = out.logits 
-
         logprobs = F.log_softmax(logits, dim=-1)
         logprobs = logprobs[:, 3:, :]
         predicted_token_ids = torch.argmax(logprobs, dim=-1)
@@ -129,7 +130,7 @@ class CryptoModel(nn.Module):
         master_key = utils.make_random_key(key_size=128, return_negative=False).type(Tensor)   # (key_size, )
 
         optimizer = torch.optim.Adam(
-            self.discriminator.parameters(),
+            self.output_layer.parameters(),
             lr=config.lr
         )
 
@@ -144,9 +145,9 @@ class CryptoModel(nn.Module):
                     continue
                 
                 valid_embed_vectors = outputs['embed_vectors']
-                valid_key = master_key.repeat(valid_embed_vectors.size(0), 1)
+                valid_key = master_key.repeat(valid_embed_vectors.size(0), 1)   # (b, 384)
                 
-                fake_embed_vectors = Tensor(np.random.normal(0, 1, valid_embed_vectors.shape))
+                fake_embed_vectors = Tensor(np.random.normal(0, 1, valid_embed_vectors.shape ))
 
                 batch_embed_vectors = torch.cat([valid_embed_vectors, fake_embed_vectors])
                 batch_key = torch.cat([valid_key, valid_key])
@@ -167,7 +168,10 @@ class CryptoModel(nn.Module):
                 print(f"cosine similarity loss : {loss.item()}")
 
         # save model
+        if not os.path.exists('model'):
+            os.makedirs('model', exist_ok=True)
         torch.save(self.state_dict(), config.save_path)
+        
         return
     
     @torch.no_grad()
@@ -192,6 +196,7 @@ class CryptoModel(nn.Module):
             
         return
     
+    @torch.no_grad()
     def inference(self, config: OmegaConf, wav_path: str, user_input: str) -> None:
         sound_data = load_sound_data(wav_path, return_mel=True)
         self.load_state_dict(torch.load(config.load_path))
