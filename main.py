@@ -18,8 +18,8 @@ TODO:
             TODO: Mean Pooling 추가 (X) [폐기]
         TODO: 손실함수 정의
             TODO: 적대적 생성 신경망 (O)
-                TODO: key generate 모델 학습을 더 어렵게 만들기
-    TODO : 랜덤성 부여
+                TODO: key generate 모델 학습을 더 어렵게 만들기 (O)
+    TODO : 데이터셋 위치 바꾸기
 """
 
 def main(user_input, stage='train'):
@@ -27,16 +27,16 @@ def main(user_input, stage='train'):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     # load audio data
-    dataset = augment_sound_data(['sample1.wav', 'sample2.wav', 'sample3.wav', 'sample4.wav'])
+    dataset = augment_sound_data('dataset/train')
     dataset = SoundDataset(dataset)
     
     model = CryptoModel().to(device)
     if stage == 'train':
         model.trainer(getattr(config, 'training'), dataset, user_input)
     elif stage == 'test':    
-        model.test(getattr(config, 'inference'), 'compare2.wav', user_input)
+        model.test(getattr(config, 'inference'), 'dataset/test/compare2.wav', user_input)
     elif stage == 'inference':
-        model.inference(getattr(config, 'inference'), 'sample1.wav', user_input)    
+        model.inference(getattr(config, 'inference'), 'dataset/test/sample1.wav', user_input)    
     return
 
 if __name__ == "__main__":
